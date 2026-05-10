@@ -23,6 +23,9 @@ struct pixart_data {
 
     enum pixart_input_mode curr_mode;
     uint32_t curr_cpi;
+    /* Runtime-adjustable MOVE/SCROLL/BALL_ACTION CPI (initialised to
+     * CONFIG_PMW3610_CPI, updated by zmk_pmw3610_cpi_change()). */
+    uint32_t runtime_cpi;
     int32_t scroll_delta_x;
     int32_t scroll_delta_y;
     int32_t ball_action_delta_x;

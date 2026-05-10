@@ -482,7 +482,11 @@ static int pmw3610_async_init_configure(const struct device *dev) {
 
     // cpi
     if (!err) {
-        err = set_cpi(dev, CONFIG_PMW3610_CPI);
+        struct pixart_data *d = dev->data;
+        if (d->runtime_cpi == 0) {
+            d->runtime_cpi = CONFIG_PMW3610_CPI;
+        }
+        err = set_cpi(dev, d->runtime_cpi);
     }
 
     // set performace register: run mode, vel_rate, poshi_rate, poslo_rate
@@ -730,11 +734,11 @@ static int pmw3610_report_data(const struct device *dev) {
     bool input_mode_changed = data->curr_mode != input_mode;
     switch (input_mode) {
     case MOVE:
-        set_cpi_if_needed(dev, CONFIG_PMW3610_CPI);
+        set_cpi_if_needed(dev, data->runtime_cpi);
         dividor = CONFIG_PMW3610_CPI_DIVIDOR;
         break;
     case SCROLL:
-        set_cpi_if_needed(dev, CONFIG_PMW3610_CPI);
+        set_cpi_if_needed(dev, data->runtime_cpi);
         if (input_mode_changed) {
             data->scroll_delta_x = 0;
             data->scroll_delta_y = 0;
@@ -746,7 +750,7 @@ static int pmw3610_report_data(const struct device *dev) {
         dividor = CONFIG_PMW3610_SNIPE_CPI_DIVIDOR;
         break;
     case BALL_ACTION:
-        set_cpi_if_needed(dev, CONFIG_PMW3610_CPI);
+        set_cpi_if_needed(dev, data->runtime_cpi);
         if (input_mode_changed) {
             data->ball_action_delta_x = 0;
             data->ball_action_delta_y = 0;
@@ -979,6 +983,9 @@ static int pmw3610_init(const struct device *dev) {
     // init smart algorithm flag;
     data->sw_smart_flag = false;
 
+    // init runtime (dynamic) cpi to the Kconfig default
+    data->runtime_cpi = CONFIG_PMW3610_CPI;
+
     // init trigger handler work
     k_work_init(&data->trigger_work, pmw3610_work_callback);
 
@@ -1166,3 +1173,80 @@ DT_INST_FOREACH_CHILD(0, BALL_ACTIONS_INST)
                           &data##n, &config##n, POST_KERNEL, CONFIG_SENSOR_INIT_PRIORITY, NULL);
 
 DT_INST_FOREACH_STATUS_OKAY(PMW3610_DEFINE)
+
+/* ---------------------------------------------------------------------------
+ *  Public runtime-settings API
+ * ------------------------------------------------------------------------- */
+
+#include <zmk/pmw3610.h>
+
+/* Use instance 0 as the singleton target for runtime adjustments. */
+#define PMW3610_RUNTIME_INST 0
+
+static const struct device *zmk_pmw3610_get_dev(void) {
+#if DT_NODE_HAS_STATUS(DT_DRV_INST(PMW3610_RUNTIME_INST), okay)
+    const struct device *dev = DEVICE_DT_GET(DT_DRV_INST(PMW3610_RUNTIME_INST));
+    if (!device_is_ready(dev)) {
+        return NULL;
+    }
+    return dev;
+#else
+    return NULL;
+#endif
+}
+
+int zmk_pmw3610_cpi_change(int amount) {
+    const struct device *dev = zmk_pmw3610_get_dev();
+    if (dev == NULL) {
+        LOG_ERR("PMW3610 device not available for CPI change");
+        return -ENODEV;
+    }
+
+    struct pixart_data *data = dev->data;
+
+    int32_t current = (int32_t)data->runtime_cpi;
+    int32_t target = current + amount;
+
+    /* Snap to 200-cpi step and clamp to sensor limits. */
+    if (target < (int32_t)PMW3610_MIN_CPI) {
+        target = PMW3610_MIN_CPI;
+    } else if (target > (int32_t)PMW3610_MAX_CPI) {
+        target = PMW3610_MAX_CPI;
+    }
+    target = (target / 200) * 200;
+    if (target < (int32_t)PMW3610_MIN_CPI) {
+        target = PMW3610_MIN_CPI;
+    }
+
+    if ((uint32_t)target == data->runtime_cpi) {
+        LOG_INF("PMW3610 CPI unchanged at %d (requested delta %d)", target, amount);
+        return 0;
+    }
+
+    data->runtime_cpi = (uint32_t)target;
+    LOG_INF("PMW3610 runtime CPI -> %d (delta %d)", target, amount);
+
+    /* If current input mode actually uses the runtime CPI, push immediately
+     * so the change is audible without waiting for the next mode switch. */
+    if (data->ready) {
+        switch (data->curr_mode) {
+        case MOVE:
+        case SCROLL:
+        case BALL_ACTION:
+            return set_cpi_if_needed(dev, data->runtime_cpi);
+        default:
+            break;
+        }
+    }
+
+    return 0;
+}
+
+int zmk_pmw3610_cpi_get(void) {
+    const struct device *dev = zmk_pmw3610_get_dev();
+    if (dev == NULL) {
+        return -ENODEV;
+    }
+    struct pixart_data *data = dev->data;
+    return (int)data->runtime_cpi;
+}

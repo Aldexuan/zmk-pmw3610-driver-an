@@ -1,0 +1,5 @@
+description: PMW3610 runtime setting behavior
+
+compatible: "zmk,behavior-pmw3610-setting"
+
+include: one_param.yaml

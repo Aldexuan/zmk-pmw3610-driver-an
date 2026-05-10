@@ -217,8 +217,23 @@ config PMW3610_ACCELERATION_SENSITIVITY
     help
       Acceleration sensitivity. Higher values make mouse movement more responsive with stronger acceleration.
 
+config PMW3610_CPI_STEP
+    int "PMW3610's CPI step per setting-behavior press"
+    default 200
+    range 200 3200
+    help
+      Amount of CPI added/removed each time the zmk,behavior-pmw3610-setting
+      behavior is pressed with PMW_CPI_INCR / PMW_CPI_DECR. Must be a
+      multiple of 200 (sensor hardware step).
+
 module = PMW3610
 module-str = PMW3610
 source "${ZEPHYR_BASE}/subsys/logging/Kconfig.template.log_config"
 
 endif #PMW3610
+
+DT_COMPAT_ZMK_BEHAVIOR_PMW3610_SETTING := zmk,behavior-pmw3610-setting
+
+config ZMK_BEHAVIOR_PMW3610_SETTING
+    bool
+    default PMW3610 && $(dt_compat_enabled,$(DT_COMPAT_ZMK_BEHAVIOR_PMW3610_SETTING))

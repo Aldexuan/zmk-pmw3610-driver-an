@@ -13,6 +13,7 @@ the driver.
 - !! Reduced battery comsumption in deep sleep by 5.5x on the trackball board !!
 - Support for ZMK 0.3
 - Addition of mouse acceleration, two modes available: sigmoid and quadratic
+- Runtime CPI adjustment via a new `zmk,behavior-pmw3610-setting` behavior.
 
 ## Installation
 
@@ -131,4 +132,36 @@ CONFIG_PM_DEVICE=y
 CONFIG_PMW3610_PM=y
 CONFIG_PMW3610_ACCELERATION_ALGORITHM=2 # 0: disabled, 1: quadratic, 2: sigmoid
 CONFIG_PMW3610_ACCELERATION_SENSITIVITY=10 # 1-100
+```
+
+## Runtime CPI keys
+
+This module ships a small behavior that lets you bump the trackball CPI up and
+down straight from your keymap, without rebuilding the firmware.
+
+In your keymap:
+
+```dts
+#include <behaviors/pmw3610_setting.dtsi>
+#include <dt-bindings/zmk/pmw3610_settings.h>
+
+#define U_PMS_CPI_I &pms PMW_CPI_INCR
+#define U_PMS_CPI_D &pms PMW_CPI_DECR
+```
+
+Then drop `U_PMS_CPI_I` / `U_PMS_CPI_D` (or `&pms PMW_CPI_INCR` / `&pms
+PMW_CPI_DECR`) into your layer bindings.
+
+Every press adjusts the runtime CPI by `CONFIG_PMW3610_CPI_STEP` (default
+`200`). The resulting value is clamped to the PMW3610's `200..3200` range and
+snapped to the nearest 200-cpi step (the sensor's hardware granularity). The
+change is pushed to the sensor immediately whenever the active input mode
+actually uses CPI (MOVE / SCROLL / BALL_ACTION); SNIPE still uses
+`CONFIG_PMW3610_SNIPE_CPI`.
+
+Optional Kconfig:
+
+```conf
+# CPI delta per key press (must be a multiple of 200).
+CONFIG_PMW3610_CPI_STEP=200
 ```
