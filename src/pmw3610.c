@@ -64,6 +64,13 @@ static int pmw3610_async_init_clear_ob1(const struct device *dev);
 static int pmw3610_async_init_check_ob1(const struct device *dev);
 static int pmw3610_async_init_configure(const struct device *dev);
 
+/* Forward declarations for settings-persistence helpers implemented near the
+ * bottom of this file. Called from pmw3610_async_init_configure() so that a
+ * previously-persisted CPI is applied before set_cpi() programs the sensor. */
+static void pmw3610_settings_init(void);
+static uint32_t pmw3610_get_persisted_cpi(void);
+static int pmw3610_settings_schedule_save(void);
+
 static int (*const async_init_fn[ASYNC_INIT_STEP_COUNT])(const struct device *dev) = {
     [ASYNC_INIT_STEP_POWER_UP] = pmw3610_async_init_power_up,
     [ASYNC_INIT_STEP_CLEAR_OB1] = pmw3610_async_init_clear_ob1,
@@ -983,13 +990,6 @@ static int pmw3610_init_irq(const struct device *dev) {
 
     return err;
 }
-
-/* Forward declarations for settings-persistence helpers implemented near the
- * bottom of this file. Called from pmw3610_async_init_configure() so that a
- * previously-persisted CPI is applied before set_cpi() programs the sensor. */
-static void pmw3610_settings_init(void);
-static uint32_t pmw3610_get_persisted_cpi(void);
-static int pmw3610_settings_schedule_save(void);
 
 static int pmw3610_init(const struct device *dev) {
     LOG_INF("Start initializing...");
