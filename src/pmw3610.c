@@ -16,6 +16,7 @@
 #include <zephyr/device.h>
 #include <zephyr/sys/dlist.h>
 #include <zephyr/pm/device.h>
+#include <zephyr/settings/settings.h>
 #include <drivers/behavior.h>
 #include <math.h>
 #include <zmk/keymap.h>
@@ -483,7 +484,20 @@ static int pmw3610_async_init_configure(const struct device *dev) {
     // cpi
     if (!err) {
         struct pixart_data *d = dev->data;
-        if (d->runtime_cpi == 0) {
+        /* Lazy-init the settings subsystem (safe now: we are running from
+         * the system work queue, post-kernel, so the flash backend is up).
+         * If a persisted CPI exists AND runtime_cpi is still the cold-boot
+         * default, adopt the persisted value so the user's last choice
+         * survives reboots / soft-off wake-ups. On PM RESUME we keep
+         * whatever the user had set mid-session (RAM preserved). */
+        pmw3610_settings_init();
+        if (d->runtime_cpi == CONFIG_PMW3610_CPI) {
+            uint32_t persisted = pmw3610_get_persisted_cpi();
+            if (persisted >= PMW3610_MIN_CPI && persisted <= PMW3610_MAX_CPI) {
+                d->runtime_cpi = persisted;
+                LOG_INF("Applied persisted PMW3610 CPI=%u", d->runtime_cpi);
+            }
+        } else if (d->runtime_cpi == 0) {
             d->runtime_cpi = CONFIG_PMW3610_CPI;
         }
         err = set_cpi(dev, d->runtime_cpi);
@@ -970,6 +984,13 @@ static int pmw3610_init_irq(const struct device *dev) {
     return err;
 }
 
+/* Forward declarations for settings-persistence helpers implemented near the
+ * bottom of this file. Called from pmw3610_async_init_configure() so that a
+ * previously-persisted CPI is applied before set_cpi() programs the sensor. */
+static void pmw3610_settings_init(void);
+static uint32_t pmw3610_get_persisted_cpi(void);
+static int pmw3610_settings_schedule_save(void);
+
 static int pmw3610_init(const struct device *dev) {
     LOG_INF("Start initializing...");
 
@@ -1183,6 +1204,121 @@ DT_INST_FOREACH_STATUS_OKAY(PMW3610_DEFINE)
 /* Use instance 0 as the singleton target for runtime adjustments. */
 #define PMW3610_RUNTIME_INST 0
 
+static const struct device *zmk_pmw3610_get_dev(void);
+
+/* ---------------------------------------------------------------------------
+ *  Settings persistence (flash-backed)
+ * ---------------------------------------------------------------------------
+ * The runtime CPI lives in RAM (struct pixart_data::runtime_cpi), so it is
+ * lost whenever the keyboard does a full reset - which happens on every
+ * soft-off wake-up. To make the user-selected CPI survive resets we stash it
+ * in Zephyr's settings subsystem (flash-backed), mirroring what the PS/2
+ * mouse driver does for its trackpoint settings.
+ *
+ * Writes are debounced through a k_work_delayable so bursty key presses
+ * collapse into a single flash write (CONFIG_ZMK_SETTINGS_SAVE_DEBOUNCE,
+ * 60 s by default in ZMK). This is the exact pattern ZMK uses for BLE
+ * profile storage and keeps flash wear at a minimum.
+ */
+
+#if IS_ENABLED(CONFIG_SETTINGS)
+
+#define PMW3610_SETTINGS_SUBTREE "pmw3610"
+#define PMW3610_SETTINGS_KEY_CPI "cpi"
+
+/* Value read from flash during settings_load, applied during async init
+ * before the initial set_cpi() call runs. Zero means "no stored value". */
+static uint32_t pmw3610_persisted_cpi;
+
+static struct k_work_delayable pmw3610_save_work;
+
+static void pmw3610_save_work_handler(struct k_work *work) {
+    ARG_UNUSED(work);
+
+    const struct device *dev = zmk_pmw3610_get_dev();
+    if (dev == NULL) {
+        return;
+    }
+    struct pixart_data *data = dev->data;
+
+    uint32_t value = data->runtime_cpi;
+    int err = settings_save_one(PMW3610_SETTINGS_SUBTREE "/" PMW3610_SETTINGS_KEY_CPI, &value,
+                                sizeof(value));
+    if (err) {
+        LOG_ERR("Failed to persist PMW3610 CPI: %d", err);
+    } else {
+        LOG_INF("Persisted PMW3610 CPI=%u to flash", value);
+    }
+}
+
+static int pmw3610_settings_schedule_save(void) {
+    int ret = k_work_reschedule(&pmw3610_save_work, K_MSEC(CONFIG_ZMK_SETTINGS_SAVE_DEBOUNCE));
+    return MIN(ret, 0);
+}
+
+static int pmw3610_settings_restore(const char *name, size_t len, settings_read_cb read_cb,
+                                    void *cb_arg) {
+    if (strcmp(name, PMW3610_SETTINGS_KEY_CPI) != 0) {
+        return 0;
+    }
+    if (len != sizeof(pmw3610_persisted_cpi)) {
+        LOG_WRN("Stored CPI has unexpected size %u; ignoring", (unsigned int)len);
+        return 0;
+    }
+    uint32_t value;
+    int rc = read_cb(cb_arg, &value, sizeof(value));
+    if (rc < 0) {
+        LOG_ERR("Failed to read stored CPI: %d", rc);
+        return rc;
+    }
+    pmw3610_persisted_cpi = value;
+    LOG_INF("Loaded persisted PMW3610 CPI=%u", value);
+    return 0;
+}
+
+static struct settings_handler pmw3610_settings_conf = {
+    .name = PMW3610_SETTINGS_SUBTREE,
+    .h_set = pmw3610_settings_restore,
+};
+
+static uint32_t pmw3610_get_persisted_cpi(void) { return pmw3610_persisted_cpi; }
+
+/* One-shot lazy init. Safe to call repeatedly - only the first call does
+ * anything. Invoked from pmw3610_async_init_configure() so it runs on the
+ * system work queue, after kernel startup, when the flash backend is up. */
+static void pmw3610_settings_init(void) {
+    static bool done;
+    if (done) {
+        return;
+    }
+    done = true;
+
+    k_work_init_delayable(&pmw3610_save_work, pmw3610_save_work_handler);
+
+    int err = settings_subsys_init();
+    if (err) {
+        LOG_WRN("settings_subsys_init failed (%d); CPI will not persist", err);
+        return;
+    }
+    err = settings_register(&pmw3610_settings_conf);
+    if (err && err != -EEXIST) {
+        LOG_WRN("settings_register failed (%d); CPI will not persist", err);
+        return;
+    }
+    err = settings_load_subtree(PMW3610_SETTINGS_SUBTREE);
+    if (err) {
+        LOG_WRN("settings_load_subtree failed (%d); using default CPI", err);
+    }
+}
+
+#else /* !CONFIG_SETTINGS */
+
+static inline void pmw3610_settings_init(void) {}
+static inline int pmw3610_settings_schedule_save(void) { return 0; }
+static inline uint32_t pmw3610_get_persisted_cpi(void) { return 0; }
+
+#endif /* CONFIG_SETTINGS */
+
 static const struct device *zmk_pmw3610_get_dev(void) {
 #if DT_NODE_HAS_STATUS(DT_DRV_INST(PMW3610_RUNTIME_INST), okay)
     const struct device *dev = DEVICE_DT_GET(DT_DRV_INST(PMW3610_RUNTIME_INST));
@@ -1225,6 +1361,10 @@ int zmk_pmw3610_cpi_change(int amount) {
 
     data->runtime_cpi = (uint32_t)target;
     LOG_INF("PMW3610 runtime CPI -> %d (delta %d)", target, amount);
+
+    /* Persist the new value. The actual flash write is debounced inside
+     * pmw3610_save_work_handler() - bursty presses collapse into one write. */
+    pmw3610_settings_schedule_save();
 
     /* If current input mode actually uses the runtime CPI, push immediately
      * so the change is audible without waiting for the next mode switch. */
