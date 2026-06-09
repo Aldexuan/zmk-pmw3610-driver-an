@@ -22,6 +22,14 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #define CONFIG_PMW3610_CPI_STEP 200
 #endif
 
+#ifndef CONFIG_PMW3610_SNIPE_CPI_STEP
+#define CONFIG_PMW3610_SNIPE_CPI_STEP 200
+#endif
+
+#ifndef CONFIG_PMW3610_SCROLL_TICK_STEP
+#define CONFIG_PMW3610_SCROLL_TICK_STEP 5
+#endif
+
 #if IS_ENABLED(CONFIG_ZMK_BEHAVIOR_METADATA)
 
 static const struct behavior_parameter_value_metadata pms_param_values[] = {
@@ -31,6 +39,18 @@ static const struct behavior_parameter_value_metadata pms_param_values[] = {
     {.display_name = "CPI-",
      .type = BEHAVIOR_PARAMETER_VALUE_TYPE_VALUE,
      .value = PMW_CPI_DECR},
+    {.display_name = "Snipe CPI+",
+     .type = BEHAVIOR_PARAMETER_VALUE_TYPE_VALUE,
+     .value = PMW_SNIPE_CPI_INCR},
+    {.display_name = "Snipe CPI-",
+     .type = BEHAVIOR_PARAMETER_VALUE_TYPE_VALUE,
+     .value = PMW_SNIPE_CPI_DECR},
+    {.display_name = "Scroll Speed+",
+     .type = BEHAVIOR_PARAMETER_VALUE_TYPE_VALUE,
+     .value = PMW_SCROLL_SPEED_UP},
+    {.display_name = "Scroll Speed-",
+     .type = BEHAVIOR_PARAMETER_VALUE_TYPE_VALUE,
+     .value = PMW_SCROLL_SPEED_DOWN},
 };
 
 static const struct behavior_parameter_metadata_set pms_param_set[] = {
@@ -53,6 +73,16 @@ static int on_keymap_binding_pressed(struct zmk_behavior_binding *binding,
         return zmk_pmw3610_cpi_change(CONFIG_PMW3610_CPI_STEP);
     case PMW_CPI_DECR:
         return zmk_pmw3610_cpi_change(-CONFIG_PMW3610_CPI_STEP);
+    case PMW_SNIPE_CPI_INCR:
+        return zmk_pmw3610_snipe_cpi_change(CONFIG_PMW3610_SNIPE_CPI_STEP);
+    case PMW_SNIPE_CPI_DECR:
+        return zmk_pmw3610_snipe_cpi_change(-CONFIG_PMW3610_SNIPE_CPI_STEP);
+    case PMW_SCROLL_SPEED_UP:
+        /* Speed up = decrease tick threshold */
+        return zmk_pmw3610_scroll_tick_change(-CONFIG_PMW3610_SCROLL_TICK_STEP);
+    case PMW_SCROLL_SPEED_DOWN:
+        /* Speed down = increase tick threshold */
+        return zmk_pmw3610_scroll_tick_change(CONFIG_PMW3610_SCROLL_TICK_STEP);
     default:
         LOG_WRN("Unknown PMW3610 setting param %d", binding->param1);
         return -ENOTSUP;

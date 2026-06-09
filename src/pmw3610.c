@@ -507,6 +507,14 @@ static int pmw3610_async_init_configure(const struct device *dev) {
         } else if (d->runtime_cpi == 0) {
             d->runtime_cpi = CONFIG_PMW3610_CPI;
         }
+        /* Initialise snipe CPI from Kconfig default on first boot. */
+        if (d->runtime_snipe_cpi == 0) {
+            d->runtime_snipe_cpi = CONFIG_PMW3610_SNIPE_CPI;
+        }
+        /* Initialise scroll tick from Kconfig default on first boot. */
+        if (d->runtime_scroll_tick == 0) {
+            d->runtime_scroll_tick = CONFIG_PMW3610_SCROLL_TICK;
+        }
         err = set_cpi(dev, d->runtime_cpi);
     }
 
@@ -711,18 +719,21 @@ static inline void calculate_mouse_acceleration(int16_t x, int16_t y, struct pix
 
 static inline void process_scroll_events(const struct device *dev, struct pixart_data *data,
                                          int32_t delta, bool is_horizontal) {
-    if (abs(delta) > CONFIG_PMW3610_SCROLL_TICK) {
-        int event_count = abs(delta) / CONFIG_PMW3610_SCROLL_TICK;
+    uint32_t scroll_tick = data->runtime_scroll_tick > 0
+                               ? data->runtime_scroll_tick
+                               : CONFIG_PMW3610_SCROLL_TICK;
+    if (abs(delta) > scroll_tick) {
+        int event_count = abs(delta) / scroll_tick;
         const int MAX_EVENTS = 20;
         int32_t *target_delta = is_horizontal ? &data->scroll_delta_x : &data->scroll_delta_y;
 
         if (event_count > MAX_EVENTS) {
             event_count = MAX_EVENTS;
-            *target_delta = (delta > 0) ? delta - (MAX_EVENTS * CONFIG_PMW3610_SCROLL_TICK)
-                                        : delta + (MAX_EVENTS * CONFIG_PMW3610_SCROLL_TICK);
+            *target_delta = (delta > 0) ? delta - (MAX_EVENTS * scroll_tick)
+                                        : delta + (MAX_EVENTS * scroll_tick);
             data->last_remainder_time = k_uptime_get();
         } else {
-            *target_delta = delta % CONFIG_PMW3610_SCROLL_TICK;
+            *target_delta = delta % scroll_tick;
         }
 
         for (int i = 0; i < event_count; i++) {
@@ -767,7 +778,7 @@ static int pmw3610_report_data(const struct device *dev) {
         dividor = 1; // this should be handled with the ticks rather than dividors
         break;
     case SNIPE:
-        set_cpi_if_needed(dev, CONFIG_PMW3610_SNIPE_CPI);
+        set_cpi_if_needed(dev, data->runtime_snipe_cpi);
         dividor = CONFIG_PMW3610_SNIPE_CPI_DIVIDOR;
         break;
     case BALL_ACTION:
@@ -1389,4 +1400,108 @@ int zmk_pmw3610_cpi_get(void) {
     }
     struct pixart_data *data = dev->data;
     return (int)data->runtime_cpi;
+}
+
+int zmk_pmw3610_snipe_cpi_change(int amount) {
+    const struct device *dev = zmk_pmw3610_get_dev();
+    if (dev == NULL) {
+        LOG_ERR("PMW3610 device not available for snipe CPI change");
+        return -ENODEV;
+    }
+
+    struct pixart_data *data = dev->data;
+
+    /* Initialise from Kconfig default if not yet set. */
+    if (data->runtime_snipe_cpi == 0) {
+        data->runtime_snipe_cpi = CONFIG_PMW3610_SNIPE_CPI;
+    }
+
+    int32_t current = (int32_t)data->runtime_snipe_cpi;
+    int32_t target = current + amount;
+
+    /* Snap to 200-cpi step and clamp to sensor limits. */
+    if (target < (int32_t)PMW3610_MIN_CPI) {
+        target = PMW3610_MIN_CPI;
+    } else if (target > (int32_t)PMW3610_MAX_CPI) {
+        target = PMW3610_MAX_CPI;
+    }
+    target = (target / 200) * 200;
+    if (target < (int32_t)PMW3610_MIN_CPI) {
+        target = PMW3610_MIN_CPI;
+    }
+
+    if ((uint32_t)target == data->runtime_snipe_cpi) {
+        LOG_INF("PMW3610 snipe CPI unchanged at %d (requested delta %d)", target, amount);
+        return 0;
+    }
+
+    data->runtime_snipe_cpi = (uint32_t)target;
+    LOG_INF("PMW3610 snipe CPI -> %d (delta %d)", target, amount);
+
+    /* If currently in SNIPE mode, push the change to the sensor immediately. */
+    if (data->ready && data->curr_mode == SNIPE) {
+        return set_cpi_if_needed(dev, data->runtime_snipe_cpi);
+    }
+
+    return 0;
+}
+
+int zmk_pmw3610_snipe_cpi_get(void) {
+    const struct device *dev = zmk_pmw3610_get_dev();
+    if (dev == NULL) {
+        return -ENODEV;
+    }
+    struct pixart_data *data = dev->data;
+    if (data->runtime_snipe_cpi == 0) {
+        return CONFIG_PMW3610_SNIPE_CPI;
+    }
+    return (int)data->runtime_snipe_cpi;
+}
+
+int zmk_pmw3610_scroll_tick_change(int amount) {
+    const struct device *dev = zmk_pmw3610_get_dev();
+    if (dev == NULL) {
+        LOG_ERR("PMW3610 device not available for scroll tick change");
+        return -ENODEV;
+    }
+
+    struct pixart_data *data = dev->data;
+
+    /* Initialise from Kconfig default if not yet set. */
+    if (data->runtime_scroll_tick == 0) {
+        data->runtime_scroll_tick = CONFIG_PMW3610_SCROLL_TICK;
+    }
+
+    /* Positive amount = increase tick (slower).
+     * Negative amount = decrease tick (faster). */
+    int32_t target = (int32_t)data->runtime_scroll_tick + amount;
+
+    /* Clamp to a sensible range: 1 (fastest) .. 200 (slowest). */
+    if (target < 1) {
+        target = 1;
+    } else if (target > 200) {
+        target = 200;
+    }
+
+    if ((uint32_t)target == data->runtime_scroll_tick) {
+        LOG_INF("PMW3610 scroll tick unchanged at %d (requested delta %d)", target, amount);
+        return 0;
+    }
+
+    data->runtime_scroll_tick = (uint32_t)target;
+    LOG_INF("PMW3610 scroll tick -> %d (delta %d)", target, amount);
+
+    return 0;
+}
+
+int zmk_pmw3610_scroll_tick_get(void) {
+    const struct device *dev = zmk_pmw3610_get_dev();
+    if (dev == NULL) {
+        return -ENODEV;
+    }
+    struct pixart_data *data = dev->data;
+    if (data->runtime_scroll_tick == 0) {
+        return CONFIG_PMW3610_SCROLL_TICK;
+    }
+    return (int)data->runtime_scroll_tick;
 }

@@ -55,6 +55,16 @@ config PMW3610_SCROLL_TICK
     help
       Scroll tick value.
 
+config PMW3610_SCROLL_TICK_STEP
+    int "PMW3610's scroll tick step per setting-behavior press"
+    default 5
+    range 1 100
+    help
+      Amount added/removed to the scroll tick threshold each time the
+      zmk,behavior-pmw3610-setting behavior is pressed with
+      PMW_SCROLL_SPEED_UP / PMW_SCROLL_SPEED_DOWN.
+      Smaller tick = faster scrolling, larger tick = slower scrolling.
+
 choice
     prompt "Select PMW3610's polling rate"
     default PMW3610_POLLING_RATE_250

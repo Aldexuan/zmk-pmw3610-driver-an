@@ -26,6 +26,13 @@ struct pixart_data {
     /* Runtime-adjustable MOVE/SCROLL/BALL_ACTION CPI (initialised to
      * CONFIG_PMW3610_CPI, updated by zmk_pmw3610_cpi_change()). */
     uint32_t runtime_cpi;
+    /* Runtime-adjustable SNIPE CPI (initialised to CONFIG_PMW3610_SNIPE_CPI,
+     * updated by zmk_pmw3610_snipe_cpi_change()). */
+    uint32_t runtime_snipe_cpi;
+    /* Runtime-adjustable scroll tick threshold (initialised to
+     * CONFIG_PMW3610_SCROLL_TICK, updated by zmk_pmw3610_scroll_tick_change()).
+     * Smaller = faster scrolling, larger = slower. */
+    uint32_t runtime_scroll_tick;
     int32_t scroll_delta_x;
     int32_t scroll_delta_y;
     int32_t ball_action_delta_x;
