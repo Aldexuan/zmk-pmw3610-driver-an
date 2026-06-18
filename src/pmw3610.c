@@ -1052,6 +1052,54 @@ static int pmw3610_init(const struct device *dev) {
 }
 
 #ifdef CONFIG_PMW3610_PM
+/* Enter SHUTDOWN mode - reduces power consumption to <1μA */
+static int pmw3610_enter_shutdown(const struct device *dev) {
+    struct pixart_data *data = dev->data;
+    
+    if (!data->ready) {
+        LOG_DBG("Sensor already off, skipping shutdown");
+        return 0;
+    }
+    
+    LOG_INF("Entering SHUTDOWN mode");
+    
+    // Send shutdown command to register 0x3B
+    int err = reg_write(dev, PMW3610_REG_SHUTDOWN, PMW3610_SHUTDOWN_ENABLE);
+    if (err) {
+        LOG_ERR("Failed to enter shutdown mode: %d", err);
+        return err;
+    }
+    
+    // Wait for sensor to enter shutdown
+    k_msleep(1);
+    
+    data->ready = false;
+    LOG_INF("SHUTDOWN mode activated - power consumption <1μA");
+    
+    return 0;
+}
+
+/* Exit SHUTDOWN mode - wake up sensor and trigger reinitialization */
+static int pmw3610_exit_shutdown(const struct device *dev) {
+    struct pixart_data *data = dev->data;
+    
+    LOG_INF("Exiting SHUTDOWN mode");
+    
+    // Send wakeup command to register 0x3A
+    int err = _reg_write(dev, PMW3610_REG_POWER_UP_RESET, PMW3610_POWERUP_CMD_WAKEUP);
+    if (err) {
+        LOG_ERR("Failed to send wakeup command: %d", err);
+        return err;
+    }
+    
+    // Wait for sensor to wake up
+    k_msleep(10);
+    
+    LOG_INF("Wakeup command sent, reinitialization will start");
+    
+    return 0;
+}
+
 static int pmw3610_pm_action(const struct device *dev, enum pm_device_action action) {
     const struct pixart_config *config = dev->config;
     struct pixart_data *data = dev->data;
@@ -1069,6 +1117,13 @@ static int pmw3610_pm_action(const struct device *dev, enum pm_device_action act
         // Disable GPIO interrupt completely
         gpio_pin_interrupt_configure_dt(&config->irq_gpio, GPIO_INT_DISABLE);
         gpio_remove_callback(config->irq_gpio.port, &data->irq_gpio_cb);
+
+        // ✅ NEW: Enter SHUTDOWN mode BEFORE releasing pins
+        // This prevents current backfeed through SPI bus
+        err = pmw3610_enter_shutdown(dev);
+        if (err) {
+            LOG_WRN("Failed to enter shutdown mode: %d (continuing with pin release)", err);
+        }
 
         // Release IRQ pin to high-Z (input, no pull-up) to prevent back-feeding power
         err = gpio_pin_configure_dt(&config->irq_gpio, GPIO_INPUT);
@@ -1103,7 +1158,7 @@ static int pmw3610_pm_action(const struct device *dev, enum pm_device_action act
         // Mark as not ready
         data->ready = false;
 
-        LOG_INF("PMW3610 fully disabled - all pins released to high-Z");
+        LOG_INF("PMW3610 fully disabled - SHUTDOWN mode + all pins released to high-Z");
         break;
 
     case PM_DEVICE_ACTION_RESUME:
@@ -1131,12 +1186,18 @@ static int pmw3610_pm_action(const struct device *dev, enum pm_device_action act
             return err;
         }
 
+        // ✅ NEW: Exit SHUTDOWN mode and wake up sensor
+        err = pmw3610_exit_shutdown(dev);
+        if (err) {
+            LOG_WRN("Failed to exit shutdown mode: %d (continuing with reinit)", err);
+        }
+
         // Full reinitialization from power up
         data->async_init_step = ASYNC_INIT_STEP_POWER_UP;
         data->ready = false;
         k_work_schedule(&data->init_work, K_MSEC(async_init_delay[data->async_init_step]));
 
-        LOG_INF("PMW3610 reinitialization started");
+        LOG_INF("PMW3610 reinitialization started after WAKEUP");
         break;
 
     default:
