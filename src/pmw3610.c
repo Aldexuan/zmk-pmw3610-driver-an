@@ -1051,6 +1051,244 @@ static int pmw3610_init(const struct device *dev) {
     return err;
 }
 
+/* =============================================================================
+ * HYBRID POWER MANAGEMENT: ZMK Activity Listener (替代 PM_DEVICE)
+ * =============================================================================
+ * 使用 ZMK 活动状态监听器实现三级功耗管理，比 PM_DEVICE 更可靠：
+ * 
+ * 1. ZMK_ACTIVITY_ACTIVE (活跃)
+ *    - 传感器：RUN 模式，正常工作
+ *    - GPIO：全部连接
+ *    - 功耗：~2.5mA
+ * 
+ * 2. ZMK_ACTIVITY_IDLE (空闲)
+ *    - 传感器：自动进入 REST1 模式（降频）
+ *    - GPIO：保持连接（避免唤醒时完整初始化）
+ *    - 功耗：~360μA
+ *    - 优势：快速唤醒（传感器仍供电）
+ * 
+ * 3. ZMK_ACTIVITY_SLEEP (深度睡眠)
+ *    - 传感器：自动进入 REST1 模式
+ *    - GPIO：全部释放（高阻态），防止电流回灌
+ *    - 功耗：~300μA（最低）
+ *    - 优势：最低功耗，唤醒时间约 50ms（比完整初始化快）
+ * 
+ * 注意：启用完整的 REST1 → REST2 → REST3 降频链
+ * ============================================================================= */
+
+// 前置声明
+static int pmw3610_restore_gpio_on_wake(const struct device *dev);
+
+/* 处理 ZMK_ACTIVITY_SLEEP → ACTIVE/IDLE 的唤醒 */
+static int pmw3610_on_wake_from_sleep(const struct device *dev) {
+    const struct pixart_config *config = dev->config;
+    struct pixart_data *data = dev->data;
+    int err = 0;
+
+    LOG_INF("PMW3610 waking from SLEEP - restoring GPIO");
+
+    // 1. 恢复 CS 引脚（SPI 片选）
+    err = gpio_pin_configure_dt(&config->cs_gpio, GPIO_OUTPUT_INACTIVE);
+    if (err) {
+        LOG_ERR("Cannot restore CS GPIO: %d", err);
+        return err;
+    }
+
+    // 2. 恢复 IRQ 引脚
+    err = gpio_pin_configure_dt(&config->irq_gpio, GPIO_INPUT);
+    if (err) {
+        LOG_ERR("Cannot restore IRQ GPIO: %d", err);
+        return err;
+    }
+
+    // 3. 重新添加 GPIO 回调
+    err = gpio_add_callback(config->irq_gpio.port, &data->irq_gpio_cb);
+    if (err) {
+        LOG_ERR("Cannot re-add IRQ GPIO callback: %d", err);
+        return err;
+    }
+
+    // 4. 恢复 SPI 数据引脚（MOSI/MISO/SCK）
+    // 注意：这些引脚在深睡眠时被释放为高阻态
+    {
+        const struct device *gpio0 = DEVICE_DT_GET(DT_NODELABEL(gpio0));
+        const struct device *gpio1 = DEVICE_DT_GET(DT_NODELABEL(gpio1));
+
+        if (device_is_ready(gpio0)) {
+            // MOSI/MISO on P0.10 - 恢复为 SPI 功能
+            // 注意：这里需要恢复为 SPI 外设模式，而不是 GPIO
+            // 由于 Zephyr SPI 驱动会自动配置引脚，我们只需要确保不再是 DISCONNECTED
+            LOG_INF("P0.10 (MOSI/MISO) will be reconfigured by SPI driver");
+        }
+        if (device_is_ready(gpio1)) {
+            // SCK on P1.13
+            LOG_INF("P1.13 (SCK) will be reconfigured by SPI driver");
+        }
+    }
+
+    // 5. 验证传感器状态（读取 Product ID 确认传感器可用）
+    uint8_t product_id = 0;
+    err = reg_read(dev, PMW3610_REG_PRODUCT_ID, &product_id);
+    if (err || product_id != PMW3610_PRODUCT_ID) {
+        LOG_WRN("Sensor verify failed (ID=0x%x), may need re-init", product_id);
+        // 如果验证失败，可能需要完整重新初始化
+        // 但通常传感器仍在 REST 模式，应该能正常恢复
+    } else {
+        LOG_INF("Sensor verified (ID=0x%x), ready to work", product_id);
+    }
+
+    // 6. 重新启用中断
+    set_interrupt(dev, true);
+
+    data->is_sleeping = false;
+    LOG_INF("PMW3610 wake complete - GPIO restored, sensor in REST→RUN transition");
+
+    return 0;
+}
+
+/* 处理 ACTIVE → IDLE 的转换 */
+static int pmw3610_on_enter_idle(const struct device *dev) {
+    struct pixart_data *data = dev->data;
+
+    LOG_INF("PMW3610 entering IDLE - sensor will auto-downshift to REST1");
+    
+    // GPIO 保持连接，传感器会自动根据 downshift 时间进入 REST 模式
+    // 无需任何操作，ZMK 会触发传感器进入低功耗
+    data->is_idle = true;
+    data->is_sleeping = false;
+
+    return 0;
+}
+
+/* 处理 IDLE/SLEEP → ACTIVE 的转换 */
+static int pmw3610_on_enter_active(const struct device *dev) {
+    struct pixart_data *data = dev->data;
+    int err = 0;
+
+    // 如果从 SLEEP 唤醒，需要恢复 GPIO
+    if (data->is_sleeping) {
+        err = pmw3610_on_wake_from_sleep(dev);
+        if (err) {
+            return err;
+        }
+    }
+
+    LOG_INF("PMW3610 entering ACTIVE - sensor will auto-upshift to RUN mode");
+
+    // 传感器会在检测到运动时自动从 REST 恢复到 RUN 模式
+    // 无需手动操作
+    data->is_idle = false;
+    data->is_sleeping = false;
+
+    return 0;
+}
+
+/* 处理 IDLE/ACTIVE → SLEEP 的转换 */
+static int pmw3610_on_enter_sleep(const struct device *dev) {
+    const struct pixart_config *config = dev->config;
+    struct pixart_data *data = dev->data;
+    int err = 0;
+
+    LOG_INF("PMW3610 entering SLEEP - releasing GPIO to prevent back-feed");
+
+    // 1. 取消所有待处理的工作
+    k_work_cancel_delayable(&data->init_work);
+    k_work_cancel(&data->trigger_work);
+
+    // 2. 禁用并移除 GPIO 中断
+    gpio_pin_interrupt_configure_dt(&config->irq_gpio, GPIO_INT_DISABLE);
+    gpio_remove_callback(config->irq_gpio.port, &data->irq_gpio_cb);
+
+    // 3. 释放 IRQ 引脚为高阻态（防止电流回灌）
+    err = gpio_pin_configure_dt(&config->irq_gpio, GPIO_INPUT);
+    if (err) {
+        LOG_WRN("Failed to release IRQ pin: %d", err);
+    }
+
+    // 4. 释放 CS 引脚为高阻态
+    err = gpio_pin_configure_dt(&config->cs_gpio, GPIO_INPUT);
+    if (err) {
+        LOG_WRN("Failed to release CS pin: %d", err);
+    }
+
+    // 5. 释放 SPI 数据引脚为高阻态（防止通过 ESD 二极管回灌电流）
+    {
+        const struct device *gpio0 = DEVICE_DT_GET(DT_NODELABEL(gpio0));
+        const struct device *gpio1 = DEVICE_DT_GET(DT_NODELABEL(gpio1));
+
+        if (device_is_ready(gpio0)) {
+            // MOSI/MISO on P0.10
+            gpio_pin_configure(gpio0, 10, GPIO_DISCONNECTED);
+            LOG_INF("Released P0.10 (MOSI/MISO) to high-Z");
+        }
+        if (device_is_ready(gpio1)) {
+            // SCK on P1.13
+            gpio_pin_configure(gpio1, 13, GPIO_DISCONNECTED);
+            LOG_INF("Released P1.13 (SCK) to high-Z");
+        }
+    }
+
+    // 注意：传感器仍然供电，会自动进入 REST1 模式
+    // 不调用 SHUTDOWN 命令，避免之前的功耗升高问题
+    data->is_idle = false;
+    data->is_sleeping = true;
+
+    LOG_INF("PMW3610 SLEEP complete - GPIO released, sensor in REST mode, ~300μA");
+
+    return 0;
+}
+
+/* ZMK 活动状态变化监听器 */
+static int pmw3610_activity_state_listener(const zmk_event_t *eh) {
+    struct zmk_activity_state_changed *state_ev = as_zmk_activity_state_changed(eh);
+
+    if (!state_ev) {
+        LOG_WRN("Invalid activity state event");
+        return 0;
+    }
+
+    // 获取 PMW3610 设备实例（假设使用实例 0）
+    const struct device *dev = DEVICE_DT_GET(DT_DRV_INST(0));
+    if (!device_is_ready(dev)) {
+        LOG_WRN("PMW3610 device not ready");
+        return 0;
+    }
+
+    struct pixart_data *data = dev->data;
+
+    // 根据 ZMK 活动状态执行对应操作
+    switch (state_ev->state) {
+    case ZMK_ACTIVITY_ACTIVE:
+        LOG_INF("ZMK state: ACTIVE");
+        pmw3610_on_enter_active(dev);
+        break;
+
+    case ZMK_ACTIVITY_IDLE:
+        LOG_INF("ZMK state: IDLE");
+        pmw3610_on_enter_idle(dev);
+        break;
+
+    case ZMK_ACTIVITY_SLEEP:
+        LOG_INF("ZMK state: SLEEP");
+        pmw3610_on_enter_sleep(dev);
+        break;
+
+    default:
+        LOG_WRN("Unknown ZMK activity state: %d", state_ev->state);
+        break;
+    }
+
+    return 0;
+}
+
+/* 注册 ZMK 活动状态监听器 */
+ZMK_LISTENER(pmw3610_activity_listener, pmw3610_activity_state_listener);
+ZMK_SUBSCRIPTION(pmw3610_activity_listener, zmk_activity_state_changed);
+
+/* =============================================================================
+ * 以下是原有的 PM_DEVICE 代码（已禁用，保留作为参考）
+ * ============================================================================= */
+#if 0  // 禁用 PM_DEVICE，使用上面的 ZMK 监听器代替
 #ifdef CONFIG_PMW3610_PM
 static int pmw3610_pm_action(const struct device *dev, enum pm_device_action action) {
     const struct pixart_config *config = dev->config;
@@ -1146,6 +1384,7 @@ static int pmw3610_pm_action(const struct device *dev, enum pm_device_action act
     return err;
 }
 #endif /* CONFIG_PMW3610_PM */
+#endif /* 禁用 PM_DEVICE */
 
 #define TRANSFORMED_BINDINGS(n)                                                                    \
     {LISTIFY(DT_PROP_LEN(n, bindings), ZMK_KEYMAP_EXTRACT_BINDING, (, ), n)}

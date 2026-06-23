@@ -71,6 +71,10 @@ struct pixart_data {
 
     // for scroll acceleration
     int64_t last_remainder_time;
+    
+    // ✅ Hybrid power management states
+    bool is_idle;         // ZMK_ACTIVITY_IDLE state
+    bool is_sleeping;     // ZMK_ACTIVITY_SLEEP state (GPIO released)
 };
 
 // ball action config data structure
