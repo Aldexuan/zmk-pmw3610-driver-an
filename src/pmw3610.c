@@ -1288,7 +1288,6 @@ ZMK_SUBSCRIPTION(pmw3610_activity_listener, zmk_activity_state_changed);
  * 以下是原有的 PM_DEVICE 代码（已禁用，保留作为参考）
  * ============================================================================= */
 #if 0  // 禁用 PM_DEVICE，使用上面的 ZMK 监听器代替
-#ifdef CONFIG_PMW3610_PM
 static int pmw3610_pm_action_DISABLED(const struct device *dev, enum pm_device_action action) {
     const struct pixart_config *config = dev->config;
     struct pixart_data *data = dev->data;
