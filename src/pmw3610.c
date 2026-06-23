@@ -1069,10 +1069,11 @@ static int pmw3610_init(const struct device *dev) {
  *    - 优势：快速唤醒（传感器仍供电）
  * 
  * 3. ZMK_ACTIVITY_SLEEP (深度睡眠)
- *    - 传感器：自动进入 REST1 模式
- *    - GPIO：全部释放（高阻态），防止电流回灌
- *    - 功耗：~300μA（最低）
- *    - 优势：最低功耗，唤醒时间约 50ms（比完整初始化快）
+ *    - 传感器：自动进入 REST3 模式（经过 REST1→REST2→REST3 降频链）
+ *    - GPIO：全部释放（完全断开状态），防止电流回灌和漏电
+ *    - 功耗：~300-350μA（目标）
+ *    - 组成：传感器 REST3 (~200μA) + MCU (~50μA) + BLE (~50μA) + 其他 (~50μA)
+ *    - 优势：低功耗，唤醒时间约 50ms（比完整初始化快）
  * 
  * 注意：启用完整的 REST1 → REST2 → REST3 降频链
  * ============================================================================= */
@@ -1086,63 +1087,44 @@ static int pmw3610_on_wake_from_sleep(const struct device *dev) {
     struct pixart_data *data = dev->data;
     int err = 0;
 
-    LOG_INF("PMW3610 waking from SLEEP - restoring GPIO");
+    LOG_INF("PMW3610 waking from SLEEP - restoring GPIO and reinitializing");
 
-    // 1. 恢复 CS 引脚（SPI 片选）
+    // 1. 恢复 CS 引脚（SPI 片选）- 输出，非激活状态（高电平）
     err = gpio_pin_configure_dt(&config->cs_gpio, GPIO_OUTPUT_INACTIVE);
     if (err) {
         LOG_ERR("Cannot restore CS GPIO: %d", err);
         return err;
     }
 
-    // 2. 恢复 IRQ 引脚
+    // 2. 恢复 IRQ 引脚 - 输入模式
     err = gpio_pin_configure_dt(&config->irq_gpio, GPIO_INPUT);
     if (err) {
         LOG_ERR("Cannot restore IRQ GPIO: %d", err);
         return err;
     }
 
-    // 3. 重新添加 GPIO 回调
+    // 3. 重新添加 GPIO 中断回调
     err = gpio_add_callback(config->irq_gpio.port, &data->irq_gpio_cb);
     if (err) {
         LOG_ERR("Cannot re-add IRQ GPIO callback: %d", err);
         return err;
     }
 
-    // 4. 恢复 SPI 数据引脚（MOSI/MISO/SCK）
-    // 注意：这些引脚在深睡眠时被释放为高阻态
-    {
-        const struct device *gpio0 = DEVICE_DT_GET(DT_NODELABEL(gpio0));
-        const struct device *gpio1 = DEVICE_DT_GET(DT_NODELABEL(gpio1));
+    // 4. SPI 数据引脚（MOSI/MISO/SCK）会由 Zephyr SPI 驱动自动恢复
+    //    因为在第一次 SPI 传输时，驱动会重新配置引脚为 SPI 功能
+    LOG_DBG("SPI data pins will be reconfigured by SPI driver on first transaction");
 
-        if (device_is_ready(gpio0)) {
-            // MOSI/MISO on P0.10 - 恢复为 SPI 功能
-            // 注意：这里需要恢复为 SPI 外设模式，而不是 GPIO
-            // 由于 Zephyr SPI 驱动会自动配置引脚，我们只需要确保不再是 DISCONNECTED
-            LOG_INF("P0.10 (MOSI/MISO) will be reconfigured by SPI driver");
-        }
-        if (device_is_ready(gpio1)) {
-            // SCK on P1.13
-            LOG_INF("P1.13 (SCK) will be reconfigured by SPI driver");
-        }
-    }
-
-    // 5. 验证传感器状态（读取 Product ID 确认传感器可用）
-    uint8_t product_id = 0;
-    err = reg_read(dev, PMW3610_REG_PRODUCT_ID, &product_id);
-    if (err || product_id != PMW3610_PRODUCT_ID) {
-        LOG_WRN("Sensor verify failed (ID=0x%x), may need re-init", product_id);
-        // 如果验证失败，可能需要完整重新初始化
-        // 但通常传感器仍在 REST 模式，应该能正常恢复
-    } else {
-        LOG_INF("Sensor verified (ID=0x%x), ready to work", product_id);
-    }
-
-    // 6. 重新启用中断
-    set_interrupt(dev, true);
-
+    // 5. 触发完整的重新初始化序列（与 PM_DEVICE_ACTION_RESUME 相同）
+    //    从 POWER_UP 步骤开始，确保传感器状态正确
+    data->async_init_step = ASYNC_INIT_STEP_POWER_UP;
+    data->ready = false;  // 在初始化完成前保持未就绪状态
+    
+    k_work_schedule(&data->init_work, K_MSEC(async_init_delay[data->async_init_step]));
+    
+    LOG_INF("PMW3610 wake: GPIO restored, full reinitialization started");
+    
+    // 注意：中断会在初始化完成后自动启用（在 pmw3610_async_init 的最后步骤）
     data->is_sleeping = false;
-    LOG_INF("PMW3610 wake complete - GPIO restored, sensor in REST→RUN transition");
 
     return 0;
 }
@@ -1200,14 +1182,14 @@ static int pmw3610_on_enter_sleep(const struct device *dev) {
     gpio_pin_interrupt_configure_dt(&config->irq_gpio, GPIO_INT_DISABLE);
     gpio_remove_callback(config->irq_gpio.port, &data->irq_gpio_cb);
 
-    // 3. 释放 IRQ 引脚为高阻态（防止电流回灌）
-    err = gpio_pin_configure_dt(&config->irq_gpio, GPIO_INPUT);
+    // 3. 释放 IRQ 引脚为完全断开状态（防止电流回灌和漏电）
+    err = gpio_pin_configure_dt(&config->irq_gpio, GPIO_DISCONNECTED);
     if (err) {
         LOG_WRN("Failed to release IRQ pin: %d", err);
     }
 
-    // 4. 释放 CS 引脚为高阻态
-    err = gpio_pin_configure_dt(&config->cs_gpio, GPIO_INPUT);
+    // 4. 释放 CS 引脚为完全断开状态
+    err = gpio_pin_configure_dt(&config->cs_gpio, GPIO_DISCONNECTED);
     if (err) {
         LOG_WRN("Failed to release CS pin: %d", err);
     }
@@ -1229,12 +1211,16 @@ static int pmw3610_on_enter_sleep(const struct device *dev) {
         }
     }
 
-    // 注意：传感器仍然供电，会自动进入 REST1 模式
+    // 6. 标记设备为未就绪（与 PM_DEVICE_ACTION_SUSPEND 相同）
+    //    防止在深睡眠期间有任何传感器访问
+    data->ready = false;
+
+    // 注意：传感器仍然供电，会自动进入 REST3 模式（经过 REST1→REST2→REST3）
     // 不调用 SHUTDOWN 命令，避免之前的功耗升高问题
     data->is_idle = false;
     data->is_sleeping = true;
 
-    LOG_INF("PMW3610 SLEEP complete - GPIO released, sensor in REST mode, ~300μA");
+    LOG_INF("PMW3610 SLEEP complete - GPIO fully disconnected, sensor in REST3, target ~300-350μA");
 
     return 0;
 }
@@ -1334,7 +1320,11 @@ DT_INST_FOREACH_CHILD(0, BALL_ACTIONS_INST)
         .ball_actions_len = BALL_ACTIONS_LEN,                                                      \
     };                                                                                             \
                                                                                                    \
-    /* ⚠️ 不使用 PM_DEVICE，功耗管理由 ZMK 活动状态监听器处理（参考 BA 驱动） */              \
+    /* 功耗管理：使用 ZMK 活动状态监听器 (替代 PM_DEVICE)                                    */   \
+    /* - ACTIVE: 传感器 RUN 模式，正常工作 (~2.5mA)                                          */   \
+    /* - IDLE: 传感器自动降频到 REST1 (~360μA)                                                */   \
+    /* - SLEEP: 传感器降至 REST3，GPIO 完全断开 (~300-350μA)                                  */   \
+    /* 注意：未使用硬件 SHUTDOWN 功能，以避免之前遇到的功耗升高问题 (700-800μA)              */   \
     DEVICE_DT_INST_DEFINE(n, pmw3610_init, NULL,                                                   \
                           &data##n, &config##n, POST_KERNEL, CONFIG_SENSOR_INIT_PRIORITY, NULL);
 
