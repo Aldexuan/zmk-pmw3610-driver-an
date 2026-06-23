@@ -1452,12 +1452,8 @@ DT_INST_FOREACH_CHILD(0, BALL_ACTIONS_INST)
         .ball_actions_len = BALL_ACTIONS_LEN,                                                      \
     };                                                                                             \
                                                                                                    \
-    /* ⚠️ 注意：虽然这里仍然定义 PM_DEVICE，但 pmw3610_pm_action 函数已被 #if 0 禁用 */    \
-    /* 实际功耗管理由 ZMK 监听器处理，PM_DEVICE 只是为了满足编译要求 */                         \
-    IF_ENABLED(CONFIG_PMW3610_PM, (PM_DEVICE_DT_INST_DEFINE(n, pmw3610_pm_action);))               \
-                                                                                                   \
-    DEVICE_DT_INST_DEFINE(n, pmw3610_init,                                                         \
-                          COND_CODE_1(CONFIG_PMW3610_PM, (PM_DEVICE_DT_INST_GET(n)), (NULL)),      \
+    /* ⚠️ 不使用 PM_DEVICE，功耗管理由 ZMK 活动状态监听器处理（参考 BA 驱动） */              \
+    DEVICE_DT_INST_DEFINE(n, pmw3610_init, NULL,                                                   \
                           &data##n, &config##n, POST_KERNEL, CONFIG_SENSOR_INIT_PRIORITY, NULL);
 
 DT_INST_FOREACH_STATUS_OKAY(PMW3610_DEFINE)
