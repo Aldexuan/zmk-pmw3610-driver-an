@@ -15,7 +15,6 @@
 #include <zephyr/input/input.h>
 #include <zephyr/device.h>
 #include <zephyr/sys/dlist.h>
-#include <zephyr/pm/device.h>
 #include <zephyr/settings/settings.h>
 #include <drivers/behavior.h>
 #include <math.h>
@@ -1283,105 +1282,6 @@ static int pmw3610_activity_state_listener(const zmk_event_t *eh) {
 /* 注册 ZMK 活动状态监听器 */
 ZMK_LISTENER(pmw3610_activity_listener, pmw3610_activity_state_listener);
 ZMK_SUBSCRIPTION(pmw3610_activity_listener, zmk_activity_state_changed);
-
-/* =============================================================================
- * 以下是原有的 PM_DEVICE 代码（已禁用，保留作为参考）
- * ============================================================================= */
-#if 0  // 禁用 PM_DEVICE，使用上面的 ZMK 监听器代替
-static int pmw3610_pm_action_DISABLED(const struct device *dev, enum pm_device_action action) {
-    const struct pixart_config *config = dev->config;
-    struct pixart_data *data = dev->data;
-    int err = 0;
-
-    switch (action) {
-    case PM_DEVICE_ACTION_SUSPEND:
-    case PM_DEVICE_ACTION_TURN_OFF:
-        LOG_INF("PMW3610 turning OFF - releasing all pins to prevent back-feed");
-
-        // Cancel all pending work
-        k_work_cancel_delayable(&data->init_work);
-        k_work_cancel(&data->trigger_work);
-
-        // Disable GPIO interrupt completely
-        gpio_pin_interrupt_configure_dt(&config->irq_gpio, GPIO_INT_DISABLE);
-        gpio_remove_callback(config->irq_gpio.port, &data->irq_gpio_cb);
-
-        // Release IRQ pin to high-Z (input, no pull-up) to prevent back-feeding power
-        err = gpio_pin_configure_dt(&config->irq_gpio, GPIO_INPUT);
-        if (err) {
-            LOG_WRN("Failed to release IRQ pin: %d", err);
-        }
-
-        // Release CS pin to high-Z (input) to prevent back-feeding power
-        err = gpio_pin_configure_dt(&config->cs_gpio, GPIO_INPUT);
-        if (err) {
-            LOG_WRN("Failed to release CS pin: %d", err);
-        }
-
-        // Release SPI data pins to high-Z to prevent back-feeding power through ESD diodes
-        // These pins are defined in the overlay: SCK=P1.13, MOSI/MISO=P0.10
-        {
-            const struct device *gpio0 = DEVICE_DT_GET(DT_NODELABEL(gpio0));
-            const struct device *gpio1 = DEVICE_DT_GET(DT_NODELABEL(gpio1));
-
-            if (device_is_ready(gpio0)) {
-                // MOSI/MISO on P0.10
-                gpio_pin_configure(gpio0, 10, GPIO_DISCONNECTED);
-                LOG_INF("Released P0.10 (MOSI/MISO) to disconnected");
-            }
-            if (device_is_ready(gpio1)) {
-                // SCK on P1.13
-                gpio_pin_configure(gpio1, 13, GPIO_DISCONNECTED);
-                LOG_INF("Released P1.13 (SCK) to disconnected");
-            }
-        }
-
-        // Mark as not ready
-        data->ready = false;
-
-        LOG_INF("PMW3610 fully disabled - all pins released to high-Z");
-        break;
-
-    case PM_DEVICE_ACTION_RESUME:
-    case PM_DEVICE_ACTION_TURN_ON:
-        LOG_INF("PMW3610 turning ON - reconfiguring pins and reinitializing");
-
-        // Reconfigure CS pin as output (inactive/high for active-low CS)
-        err = gpio_pin_configure_dt(&config->cs_gpio, GPIO_OUTPUT_INACTIVE);
-        if (err) {
-            LOG_ERR("Cannot reconfigure CS GPIO: %d", err);
-            return err;
-        }
-
-        // Reconfigure IRQ pin as input with original flags
-        err = gpio_pin_configure_dt(&config->irq_gpio, GPIO_INPUT);
-        if (err) {
-            LOG_ERR("Cannot reconfigure IRQ GPIO: %d", err);
-            return err;
-        }
-
-        // Re-add GPIO callback
-        err = gpio_add_callback(config->irq_gpio.port, &data->irq_gpio_cb);
-        if (err) {
-            LOG_ERR("Cannot re-add IRQ GPIO callback: %d", err);
-            return err;
-        }
-
-        // Full reinitialization from power up
-        data->async_init_step = ASYNC_INIT_STEP_POWER_UP;
-        data->ready = false;
-        k_work_schedule(&data->init_work, K_MSEC(async_init_delay[data->async_init_step]));
-
-        LOG_INF("PMW3610 reinitialization started");
-        break;
-
-    default:
-        return -ENOTSUP;
-    }
-
-    return err;
-}
-#endif /* 禁用 PM_DEVICE */
 
 #define TRANSFORMED_BINDINGS(n)                                                                    \
     {LISTIFY(DT_PROP_LEN(n, bindings), ZMK_KEYMAP_EXTRACT_BINDING, (, ), n)}

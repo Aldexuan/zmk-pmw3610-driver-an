@@ -627,9 +627,8 @@ CONFIG_PMW3610_REST3_SAMPLE_TIME_MS=0      # 禁用
 
 **排查步骤**：
 1. 确认SHUTDOWN功能已编译：搜索日志"SHUTDOWN mode activated"
-2. 检查PM_DEVICE配置：`CONFIG_PMW3610_PM=y`
-3. 验证引脚释放：示波器测量SPI线路在休眠时应无波动
-4. 检查pinctrl配置：确保有`spi1_sleep`状态
+2. 验证引脚释放：示波器测量SPI线路在休眠时应无波动
+3. 检查pinctrl配置：确保有`spi1_sleep`状态
 
 ### 问题：唤醒后传感器无响应
 
