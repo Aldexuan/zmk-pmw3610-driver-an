@@ -26,6 +26,8 @@
 #include <zmk/event_manager.h>
 #include <zmk/events/position_state_changed.h>
 #include <zmk/events/layer_state_changed.h>
+#include <zmk/events/activity_state_changed.h>
+#include <zmk/activity.h>
 #include "pmw3610.h"
 
 #include <zephyr/logging/log.h>
