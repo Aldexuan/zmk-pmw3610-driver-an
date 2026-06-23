@@ -1240,24 +1240,21 @@ static int pmw3610_on_enter_sleep(const struct device *dev) {
 
 /* ZMK 活动状态变化监听器 */
 static int pmw3610_activity_state_listener(const zmk_event_t *eh) {
-    struct zmk_activity_state_changed *state_ev = as_zmk_activity_state_changed(eh);
+    struct zmk_activity_state_changed *ev = as_zmk_activity_state_changed(eh);
 
-    if (!state_ev) {
-        LOG_WRN("Invalid activity state event");
-        return 0;
+    if (ev == NULL) {
+        return ZMK_EV_EVENT_BUBBLE;
     }
 
     // 获取 PMW3610 设备实例（假设使用实例 0）
     const struct device *dev = DEVICE_DT_GET(DT_DRV_INST(0));
     if (!device_is_ready(dev)) {
         LOG_WRN("PMW3610 device not ready");
-        return 0;
+        return ZMK_EV_EVENT_BUBBLE;
     }
 
-    struct pixart_data *data = dev->data;
-
     // 根据 ZMK 活动状态执行对应操作
-    switch (state_ev->state) {
+    switch (ev->state) {
     case ZMK_ACTIVITY_ACTIVE:
         LOG_INF("ZMK state: ACTIVE");
         pmw3610_on_enter_active(dev);
@@ -1274,11 +1271,11 @@ static int pmw3610_activity_state_listener(const zmk_event_t *eh) {
         break;
 
     default:
-        LOG_WRN("Unknown ZMK activity state: %d", state_ev->state);
+        LOG_WRN("Unknown ZMK activity state: %d", ev->state);
         break;
     }
 
-    return 0;
+    return ZMK_EV_EVENT_BUBBLE;
 }
 
 /* 注册 ZMK 活动状态监听器 */
