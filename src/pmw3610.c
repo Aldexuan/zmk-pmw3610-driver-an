@@ -1437,6 +1437,8 @@ DT_INST_FOREACH_CHILD(0, BALL_ACTIONS_INST)
         .ball_actions_len = BALL_ACTIONS_LEN,                                                      \
     };                                                                                             \
                                                                                                    \
+    /* ⚠️ 注意：虽然这里仍然定义 PM_DEVICE，但 pmw3610_pm_action 函数已被 #if 0 禁用 */    \
+    /* 实际功耗管理由 ZMK 监听器处理，PM_DEVICE 只是为了满足编译要求 */                         \
     IF_ENABLED(CONFIG_PMW3610_PM, (PM_DEVICE_DT_INST_DEFINE(n, pmw3610_pm_action);))               \
                                                                                                    \
     DEVICE_DT_INST_DEFINE(n, pmw3610_init,                                                         \
