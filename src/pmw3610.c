@@ -1285,11 +1285,27 @@ ZMK_LISTENER(pmw3610_activity_listener, pmw3610_activity_state_listener);
 ZMK_SUBSCRIPTION(pmw3610_activity_listener, zmk_activity_state_changed);
 
 /* =============================================================================
+ * PM_DEVICE 占位函数
+ * =============================================================================
+ * 虽然实际功耗管理由 ZMK 监听器处理，但设备定义宏需要这个函数存在
+ * 提供一个空的占位函数以满足编译要求
+ * ============================================================================= */
+#ifdef CONFIG_PMW3610_PM
+static int pmw3610_pm_action(const struct device *dev, enum pm_device_action action) {
+    // 空函数：实际功耗管理由 ZMK 活动状态监听器处理
+    // 这个函数不会被调用，只是为了满足 PM_DEVICE_DT_INST_DEFINE 宏的编译要求
+    ARG_UNUSED(dev);
+    ARG_UNUSED(action);
+    return 0;
+}
+#endif /* CONFIG_PMW3610_PM */
+
+/* =============================================================================
  * 以下是原有的 PM_DEVICE 代码（已禁用，保留作为参考）
  * ============================================================================= */
 #if 0  // 禁用 PM_DEVICE，使用上面的 ZMK 监听器代替
 #ifdef CONFIG_PMW3610_PM
-static int pmw3610_pm_action(const struct device *dev, enum pm_device_action action) {
+static int pmw3610_pm_action_DISABLED(const struct device *dev, enum pm_device_action action) {
     const struct pixart_config *config = dev->config;
     struct pixart_data *data = dev->data;
     int err = 0;
