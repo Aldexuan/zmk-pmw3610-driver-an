@@ -520,9 +520,62 @@ static int pmw3610_async_init_configure(const struct device *dev) {
     }
 
     // set performace register: run mode, vel_rate, poshi_rate, poslo_rate
+    // 强制清除 FORCE_AWAKE 位，防止传感器无法降频导致功耗升高
     if (!err) {
-        err = reg_write(dev, PMW3610_REG_PERFORMANCE, PMW3610_PERFORMANCE_VALUE);
-        LOG_INF("Set performance register (reg value 0x%x)", PMW3610_PERFORMANCE_VALUE);
+        // 确保 FORCE_AWAKE (bit 4) 被清除
+        uint8_t perf_value = PMW3610_PERFORMANCE_VALUE & ~0x10;
+        
+        err = reg_write(dev, PMW3610_REG_PERFORMANCE, perf_value);
+        LOG_INF("Set PERFORMANCE register: 0x%02x", perf_value);
+        
+        // 验证写入是否成功
+        k_msleep(10);
+        uint8_t readback = 0;
+        int read_err = reg_read(dev, PMW3610_REG_PERFORMANCE, &readback);
+        
+        if (!read_err) {
+            LOG_INF("PERFORMANCE readback: 0x%02x", readback);
+            
+            // 检查 FORCE_AWAKE 位
+            if (readback & 0x10) {
+                LOG_ERR("⚠️  FORCE_AWAKE bit is stuck! Forcing clear...");
+                
+                // 多次尝试清除（最多 5 次）
+                for (int retry = 0; retry < 5; retry++) {
+                    err = reg_write(dev, PMW3610_REG_PERFORMANCE, perf_value);
+                    k_msleep(20);
+                    reg_read(dev, PMW3610_REG_PERFORMANCE, &readback);
+                    
+                    LOG_INF("Clear retry %d: readback = 0x%02x", retry + 1, readback);
+                    
+                    if (!(readback & 0x10)) {
+                        LOG_INF("✅ FORCE_AWAKE cleared successfully on retry %d", retry + 1);
+                        break;
+                    }
+                }
+                
+                // 最终检查
+                if (readback & 0x10) {
+                    LOG_ERR("❌ Failed to clear FORCE_AWAKE after 5 retries!");
+                    LOG_ERR("   Sensor will stay in RUN mode, power consumption ~500μA higher");
+                    LOG_ERR("   Consider hardware reset or sensor replacement");
+                } else {
+                    LOG_INF("✅ FORCE_AWAKE successfully disabled");
+                }
+            } else {
+                LOG_INF("✅ FORCE_AWAKE is disabled (bit 4 = 0)");
+                LOG_INF("   Sensor can enter REST modes for power saving");
+            }
+            
+            // 输出完整的寄存器解析
+            LOG_INF("PERFORMANCE register breakdown:");
+            LOG_INF("  FORCE_AWAKE (bit 4): %s", (readback & 0x10) ? "1 (ENABLED ⚠️)" : "0 (disabled ✅)");
+            LOG_INF("  Polling rate: %s", 
+                    (readback & 0x0C) == 0x0C ? "250Hz" : 
+                    (readback & 0x0C) == 0x00 ? "125Hz" : "other");
+        } else {
+            LOG_WRN("Cannot read back PERFORMANCE register for verification");
+        }
     }
 
     // required downshift and rate registers
@@ -1060,22 +1113,28 @@ static int pmw3610_init(const struct device *dev) {
  * 1. ZMK_ACTIVITY_ACTIVE (活跃)
  *    - 传感器：RUN 模式，正常工作
  *    - GPIO：全部连接
+ *    - 中断：启用（实时响应运动）
  *    - 功耗：~2.5mA
  * 
  * 2. ZMK_ACTIVITY_IDLE (空闲)
- *    - 传感器：自动进入 REST1 模式（降频）
+ *    - 传感器：自动降频 RUN → REST1 (128ms) → REST2 (9.6s) → REST3 (28.8s)
  *    - GPIO：保持连接（避免唤醒时完整初始化）
- *    - 功耗：~360μA
- *    - 优势：快速唤醒（传感器仍供电）
+ *    - 中断：**禁用**（关键！避免传感器被不断唤醒，无法进入 REST 模式）
+ *    - 功耗：~200-250μA（REST3 模式）
+ *    - 优势：快速唤醒（传感器仍供电，无需重新初始化）
  * 
  * 3. ZMK_ACTIVITY_SLEEP (深度睡眠)
- *    - 传感器：自动进入 REST3 模式（经过 REST1→REST2→REST3 降频链）
+ *    - 传感器：保持在 REST3 模式
  *    - GPIO：全部释放（完全断开状态），防止电流回灌和漏电
+ *    - 中断：禁用并移除回调
  *    - 功耗：~300-350μA（目标）
  *    - 组成：传感器 REST3 (~200μA) + MCU (~50μA) + BLE (~50μA) + 其他 (~50μA)
- *    - 优势：低功耗，唤醒时间约 50ms（比完整初始化快）
+ *    - 优势：低功耗，唤醒时间约 50ms（需要恢复 GPIO 和重新初始化）
  * 
- * 注意：启用完整的 REST1 → REST2 → REST3 降频链
+ * 注意：
+ * - IDLE 状态必须禁用中断，否则传感器会被持续唤醒，无法降频
+ * - 启用完整的 REST1 → REST2 → REST3 降频链（Kconfig 配置）
+ * - 不使用硬件 SHUTDOWN 功能（避免之前遇到的功耗升高问题）
  * ============================================================================= */
 
 // 前置声明
@@ -1133,10 +1192,15 @@ static int pmw3610_on_wake_from_sleep(const struct device *dev) {
 static int pmw3610_on_enter_idle(const struct device *dev) {
     struct pixart_data *data = dev->data;
 
-    LOG_INF("PMW3610 entering IDLE - sensor will auto-downshift to REST1");
+    LOG_INF("PMW3610 entering IDLE - disabling IRQ to allow sensor downshift");
     
-    // GPIO 保持连接，传感器会自动根据 downshift 时间进入 REST 模式
-    // 无需任何操作，ZMK 会触发传感器进入低功耗
+    // 关键修复：禁用中断，避免传感器被不断唤醒
+    // 这样传感器才能自动降频： RUN → REST1 (128ms) → REST2 (9.6s) → REST3 (28.8s)
+    set_interrupt(dev, false);
+    
+    // 取消待处理的工作（避免残留的中断处理）
+    k_work_cancel(&data->trigger_work);
+    
     data->is_idle = true;
     data->is_sleeping = false;
 
@@ -1154,12 +1218,15 @@ static int pmw3610_on_enter_active(const struct device *dev) {
         if (err) {
             return err;
         }
+    } else if (data->is_idle) {
+        // 从 IDLE 恢复：重新启用中断
+        LOG_INF("PMW3610 resuming from IDLE - re-enabling IRQ");
+        set_interrupt(dev, true);
     }
 
     LOG_INF("PMW3610 entering ACTIVE - sensor will auto-upshift to RUN mode");
 
     // 传感器会在检测到运动时自动从 REST 恢复到 RUN 模式
-    // 无需手动操作
     data->is_idle = false;
     data->is_sleeping = false;
 

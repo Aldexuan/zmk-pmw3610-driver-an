@@ -114,11 +114,10 @@ extern "C" {
 #error "A valid PMW3610 polling rate must be selected"
 #endif
 
-#ifdef CONFIG_PMW3610_FORCE_AWAKE
-#define PMW3610_FORCE_MODE_VALUE 0xF0
-#else
+// FORCE_AWAKE 功能已完全移除，防止意外启用导致功耗升高
+// 传感器将始终允许自动降频进入 REST 模式以节省电力
+// 如果需要高性能模式，应该通过调整 downshift 时间来实现，而不是禁用降频
 #define PMW3610_FORCE_MODE_VALUE 0x00
-#endif
 
 #define PMW3610_PERFORMANCE_VALUE (PMW3610_FORCE_MODE_VALUE | PMW3610_POLLING_RATE_VALUE)
 
