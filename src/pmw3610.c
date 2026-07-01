@@ -1020,7 +1020,15 @@ static void pmw3610_work_callback(struct k_work *work) {
     const struct device *dev = data->dev;
 
     pmw3610_report_data(dev);
-    set_interrupt(dev, true);
+    
+    // 🔧 修复：只在ACTIVE状态下重新启用中断
+    // 如果系统已经进入IDLE/SLEEP，不要重新启用中断，让传感器降频
+    if (!data->is_idle && !data->is_sleeping) {
+        set_interrupt(dev, true);
+    } else {
+        LOG_DBG("Skip re-enabling IRQ: is_idle=%d, is_sleeping=%d", 
+                data->is_idle, data->is_sleeping);
+    }
 }
 
 static int pmw3610_init_irq(const struct device *dev) {
@@ -1194,15 +1202,19 @@ static int pmw3610_on_enter_idle(const struct device *dev) {
 
     LOG_INF("PMW3610 entering IDLE - disabling IRQ to allow sensor downshift");
     
-    // 关键修复：禁用中断，避免传感器被不断唤醒
+    // 🔧 关键修复：先设置状态标志，阻止work callback重新启用中断
+    data->is_idle = true;
+    data->is_sleeping = false;
+    
+    // 然后禁用中断，避免传感器被不断唤醒
     // 这样传感器才能自动降频： RUN → REST1 (128ms) → REST2 (9.6s) → REST3 (28.8s)
     set_interrupt(dev, false);
     
     // 取消待处理的工作（避免残留的中断处理）
+    // 即使有work正在执行，因为is_idle已经设置，它也不会重新启用中断
     k_work_cancel(&data->trigger_work);
     
-    data->is_idle = true;
-    data->is_sleeping = false;
+    LOG_INF("PMW3610 IDLE: IRQ disabled, sensor will downshift to REST modes");
 
     return 0;
 }
